@@ -1,0 +1,770 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <mpi.h>
+#include <string.h>
+
+#define datdir "/home/himanshu/Desktop/final-undergraduate_project/data/" //Directory where data is located
+
+
+
+
+
+char name[200];
+char RUN[5];
+
+
+#include "random_number_generator.h"
+#include "functions.h"
+#include "params.h"
+
+
+int run;
+
+
+int main(int argc, char const *argv[])
+{
+    // double MPI_Wtime();
+    double starttime;
+    double endtime;
+
+    //We have a 2d array, index along x axis is i and along y axis is j
+
+    int myStarti;  //Starting x index of array i
+    int myEndi;    //Ending x index of array i
+    int mypoints;  //number of points in a processor
+    int leftProc;  //my neighbouring left processor
+    int rightProc; //my neighbouring right processors
+    int myrank;    //rank of my processor in the COMM_WORLD comminicator
+    int numProcs = 4 ;  //number of processors
+
+
+
+    MPI_Status status;
+    //Initialise MPI
+    MPI_Init(&argc, &argv);
+    //Get the number of processors
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcs);
+    //Get the rank of each processor and store it in myrank
+    MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+
+    char procname[numProcs]; // array to store cluster name
+    int namelen;             // cluster name length
+
+    starttime = MPI_Wtime();
+
+    // Be sure to ensure that number of x-points are multiple of number of processors
+    mypoints = spacex / numProcs;
+
+    myStarti = myrank * mypoints + 1;
+
+    myEndi = myStarti + mypoints - 1;
+
+    //Variables to store filename on different processors
+    char filename[numProcs];
+    //Variables for iterations
+    int i = 0;
+    int j = 0;
+    int k = 0;
+    int iter = 0;
+
+
+
+    //Variables to store filenames at different locations
+    char filenumber[5];
+    FILE *Vout[numProcs], *V_out[numProcs], *V_in, *Tser[numProcs];
+    FILE *V_f_outnum[numProcs], *V_f_in;
+    FILE *F_n = NULL;
+
+
+    double ElecA1; //To store local time series data at a few grid points
+
+    printf("%s\n", "Starting memory alloaction.");
+
+    double t = 0.0;     // Time (ms)
+    double dt = 0.0;    // time step (ms)
+    double del_x = 0.0; // space step (cm)
+    double D[mypoints + 2][space + 2]; //Diffusion constant (cm^2/ms)
+
+    /* ----------------------------------------------------------------------*/
+    /*                 [ Myocyte Variables Declaration ]                     */
+    /* ----------------------------------------------------------------------*/
+
+    double I_stim[mypoints + 2][space + 2]; // external stimulus (pA/pF)
+    double v[mypoints + 2][space + 2]; // Myocyte Membrane potential (mV)
+    double V1[mypoints + 2][space + 2];
+    double v_f[mypoints + 2][space + 2]; // Fibroblast Membrane potential (mV)
+    double cai[mypoints + 2][space + 2]; // Intracellular Ca2+ (mM)
+    int n[mypoints + 2][space + 2];  // No. of fibroblasts connected to a single myocyte
+    double G_j[mypoints + 2][space + 2]; // Gap junctional conductance (nS)
+
+    double E_f = -10.; // Fibroblast resting Membrane potential (mV)
+    double C_f = 80.;  // Fibroblast Membrane capacitance (pF)
+    double C_m = 120.; // Myocyte Membrane capacitance (pF)
+    double G_f = 1.;   // Fibroblast membrane conductance (nS)
+
+    double ik[mypoints + 2][space + 2]; // Variable for total potassium current
+    double it[mypoints + 2][space + 2]; // Variable for total ionic current
+    double jt[mypoints + 2][space + 2]; // Variable for total calcium flux
+    double Ft[mypoints + 2][space + 2]; // Variable for total calcium force
+
+    /* ionic concentrations
+    modified from Okabe et al 1999 Eur. J Pharmacology 376:101-108*/
+    double ki = 140.0;  // Intracellular K+ (mM)
+    double nai = 4.0;   // Intracellular Na+ (mM)
+    double cli = 46.0;  // Intracellular Cl- (mM)
+    double ko = 6.0;    // Extracellular K+ (mM)
+    double cao = 2.5;   // Extracellular Ca2+ (mM)
+    double nao = 130.0; // Extracellular Na+ (mM)
+    double clo = 130.0; // Extracellular Cl- (mM)
+    double mgo = 0.5;   // Extracellular Mg2+ (mM)
+
+    double buff = 0.015; // Proportion of free Calcium ions from calcium flux
+    double AV = 4.0;     // Area to Volume ratio (cm^-1)
+
+    /* Calcium-dependent force */
+    double w[mypoints + 2][space + 2]; // dynamical variable for force
+    double Fmax = 3.0;    // maxiumal force (uN)
+    double FKm = 161.301; // half saturation calcium conc. (nM)
+    double Fn = 3.60205;  // Hill coeff  (dimensionless)
+    double wss = 0.;      // Variable for steady-state function for w gate
+    double wtc = 0.;      // Variable for time-constant function for w gate
+
+    /* --------------------------------------- */
+    /* Sodium current - INa */
+    double m[mypoints + 2][space + 2]; // dynamical variable for INa activation
+    double h[mypoints + 2][space + 2]; // dynamical variable for INa inactivation
+    double gna = 0.12;   // 0-0.12; maximal conductance for INa (nS/pF)
+    double mss = 0.;     // Variable for steady-state function for m gate
+    double hss = 0.;     // Variable for steady-state function for h gate
+    double mtc = 0.;     // Variable for time-constant function for m gate
+    double htc = 0.;     // Variable for time-constant function for h gate
+    double ena = 0.;     // Variable for reversal potential for sodium
+    double ina[mypoints + 2][space + 2]; // Variable for sodium current
+
+    /* --------------------------------------- */
+    /* L-type calcium current - ICaL */
+    double d[mypoints + 2][space + 2]; // dynamical variable for ICaL activation
+    double f1[mypoints + 2][space + 2]; // dynamical variable for ICaL fast inactivation
+    double f2[mypoints + 2][space + 2]; // dynamical variable for ICaL slow inactivation
+    double gcal = 0.6;    // Maximal conductance for ICaL (nS/pF)
+    double ecal = 45.0;   // reversal potential for ICaL (mV)
+    double kmca = 0.001;  // half saturation concentration for ICaL Ca inhibition (mM)
+    double fca = 0.;      // variable for Ca inhibition in ICaL
+    double dss = 0.;      // Variable for steady-state function for d
+    double f1ss = 0.;     // Variable for steady-state function for f1
+    double f2ss = 0.;     // Variable for steady-state function for f2
+    double dtc = 0.;      // Variable for time-constant function for d
+    double f1tc = 0.;     // Variable for time-constant function for f1
+    double f2tc = 0.;     // Variable for time-constant function for f2
+    double ical[mypoints + 2][space + 2]; // Variable for L-type calcium current
+
+    /* --------------------------------------- */
+    /* T-type calcium current - ICaT */
+    double b[mypoints + 2][space + 2]; // dynamical variable for ICaT activation
+    double g[mypoints + 2][space + 2]; // dynamical variable for ICaT inactivation
+    double gcat = 0.058;  // Maximal conductance for ICaT (nS/pF)
+    double ecat = 42.0;   // reversal potential for ICaT (mV)
+    double bss = 0.;      // Variable for steady-state function for b
+    double gss = 0.;      // Variable for steady-state function for g
+    double btc = 0.;      // Variable for time-constant function for b
+    double gtc = 0.;      // Variable for time-constant function for g
+    double icat[mypoints + 2][space + 2]; // Variable for T-type calcium current*/
+
+    /* --------------------------------------- */
+    /* Potassium conductances */
+    double gk = 0.8;   // Maximal conductance for total voltage-gated K currents (IK1, IK2, IKa) (nS/pF)
+    double gkca = 0.8; // Maximal conductance for total calcium-dependent K currents (BKa, BKab) (nS/pF)
+
+    /* --------------------------------------- */
+    /* background current - Ib */
+    double gb = 0.004; // background current conductances (nS/pF)
+    double ek = 0.;
+    double ib[mypoints + 2][space + 2]; //Variable for background current
+
+    /* --------------------------------------- */
+    /* Voltage-gated potassium - IK1 */
+    double q[mypoints + 2][space + 2]; // dynamical variable for IK1 activation
+    double r1[mypoints + 2][space + 2]; // dynamical variable for IK1 fast inactivation
+    double r2[mypoints + 2][space + 2]; // dynamical variable for IK1 slow inactivation
+    double gk1 = 0.65;   // Conductance ratios between ik1, ik2, ika (dimentionless)
+    double qss = 0.;     // Variable for steady-state function for q
+    double r1ss = 0.;    // Variable for steady-state function for r1
+    double r2ss = 0.;    // Variable for steady-state function for r2
+    double qtc = 0.;     // Variable for time-constant function for q
+    double r1tc = 0.;    // Variable for time-constant function for r1
+    double r2tc = 0.;    // Variable for time-constant function for r2
+    double ik1[mypoints + 2][space + 2]; // Variable for Voltage-gated potassium current Ik1
+
+    /* --------------------------------------- */
+    /* Voltage-gated potassium - IK2 */
+    double p[mypoints + 2][space + 2]; // dynamical variable for IK2 activation
+    double k1[mypoints + 2][space + 2]; // dynamical variable for IK2 fast inactivation
+    double k2[mypoints + 2][space + 2]; // dynamical variable for IK2 slow inactivation
+    double gk2 = 0.04;   // Conductance ratios between ik1, ik2, ika (dimensionless)
+    double pss = 0.;     // Variable for steady-state function for p
+    double k1ss = 0.;    // Variable for steady-state function for k1
+    double k2ss = 0.;    // Variable for steady-state function for k2
+    double ptc = 0.;     // time constant for p
+    double k1tc = 0.;    // time constant for k1
+    double k2tc = 0.;    // time constant for k2
+    double ik2[mypoints + 2][space + 2]; // Variable for Voltage-gated potassium current Ik2
+
+    /* --------------------------------------- */
+    /* BK current, consists of subunit alpha - BKa  */
+    double xa[mypoints + 2][space + 2]; // dynamical variable for BKa
+    double gbka = 0.2;   // Conductance ratios between BKa, BKab (dimensionless)
+    double xass_z = 0.;  // Variable for gating charge for xa
+    double xass_vh = 0.; // Variable for half activation constant for xa
+    double xass = 0.;    // Variable for steady-state for xa
+    double xatc = 0.;    // time constant for xa
+    double BKa[mypoints + 2][space + 2]; // Variable for BK current consisting of subunit alpha
+
+    /* --------------------------------------- */
+    /* BK current, consists of subunits alpha and beta1  - BKab  */
+    double xab[mypoints + 2][space + 2]; // dynamical variable for BKab
+    double gbkab = 0.1;   // Conductance ratios between BKa, BKab (dimensionless)
+    double xabss_z = 0.;  // Variable for gating charge for xab
+    double xabss_vh = 0.; // Variable for half activation constant for xab
+    double xabss = 0.;    // Variable for steady-state for xab
+    double xabtc = 0.;    // time constant for xab
+    double BKab[mypoints + 2][space + 2]; // Variable for BK current consisting of subunits alpha and beta1
+
+    /* --------------------------------------- */
+    /* A-type transient potassium current - IKa */
+    double s[mypoints + 2][space + 2]; // dynamical variable for IKa activation
+    double x[mypoints + 2][space + 2]; // dynamical variable for IKa inactivation
+    double gka = 0.2;    // Conductance ratios between ik1, ik2, ika (dimensionless)
+    double sss = 0.;     // Variable for steady-state for s
+    double xss = 0.;     // Variable for steady-state for x
+    double stc = 0.;     // time constant for s
+    double xtc = 0.;     // time constant for x
+    double ika[mypoints + 2][space + 2]; // Variable for A-type transient potassium current
+
+    /* --------------------------------------- */
+    /* Hyperpolarization-activated current - Ih */
+    double y[mypoints + 2][space + 2]; // dynamical variable for Ih activation
+    double gh = 0.0542; // Maximal conductance for Ih (nS/pF)
+    double PK = 1.0;    // Permeability ratios for K+
+    double PNa = 0.35;  // Permeability ratios for Na+
+    double yss = 0.;    // Variable for steady-state for y
+    double ya = 0.;
+    double yb = 0.;
+    double ytc = 0.;    // time constant for y
+    double eh = 0.;     // reversal potentials (mv)
+    double ih[mypoints + 2][space + 2]; // Variable for Hyperpolarization-activated current
+
+    /* --------------------------------------- */
+    /* Calcium-dependent Chloride current - ICl */
+    double c[mypoints + 2][space + 2]; // dynamical variable for ICl activation
+    double gcl = 0.1875; // Maximal conductance for ICl (nS/pF)
+    double K1cl = 0.;
+    double K2cl = 0.;
+    double css = 0.;     // Variable for steady-state for c
+    double ctc = 0.;     // time constant for c
+    double ecl = 0.;     // reversal potentials (mv)
+    double icl[mypoints + 2][space + 2]; // Variable for Calcium-dependent Chloride current
+
+    /* --------------------------------------- */
+    /* Non-specific cation current  - INSCC */
+    double gns = 0.0123;   // Maximal conductance for INSCC (nS/pF)
+    double gl = 0.0;       // Maximal conductance for the leak component of INSCC (nS/pF)
+    double PnsK = 1.3;     // Permeability of K+
+    double PnsNa = 0.9;    // Permeability of Na+
+    double PnsCa = 0.89;   // Permeability of Ca2+
+    double PnsCs = 1.0;    // Permeability of Cs+
+    double gnsCa = 0.5;    // Conductance ratio of Ca2+ in INSCC
+    double gnsNa = 1.0;    // Conductance ratio of Na+ in INSCC
+    double gnsK = 1.19;    // Conductance ratio of K+ in INSCC
+    double gnsCs = 1.6;    // Conductance ratio of Cs+ in INSCC
+    double fmg = 0.;       // Magnesium inhibition of INSCC
+    double enscc = 0.;     // reversal potentials (mv)
+    double insca = 0.;     // Ca component of INSCC
+    double insna = 0.;     // Na component of INSCC
+    double insk = 0.;      // K component of INSCC
+    double il = 0.;        // Leak component of INSCC
+    double inscc[mypoints + 2][space + 2]; // Variable for Non-specific cation current
+
+    /* --------------------------------------- */
+    /* Na-K pump */
+    double ginak = 1.7;     // Maximal current for INaK (pA/pF)
+    double nakKmko = 2.0;   // Half-saturation concentration for ko dependency
+    double nakKmnai = 22.0; // Half-saturation concentration for Nai dependency
+    double fnak = 0.;       // Voltage-dependency of INaK
+    double knak = 0.;       // ko-dependency of INaK
+    double nnak = 0.;       // nai-dependency of INaK
+    double inak[mypoints + 2][space + 2]; // INaK */
+
+    /* --------------------------------------- */
+    /* Na-Ca exchanger */
+    double Jnaca = 3.5e-6;  // maximal calium flux via Na-Ca exchanger  (mM/ms)
+    double Kmallo = 0.0003; // half saturation conc. for calcium allosteric factor  (mM)
+    double nallo = 4;       // Hill coeff. of allosteric regulation in   (dimensionless)
+    double ksat = 0.27;     // saturation factor at very negative potential
+    double xgamma = 0.35;   // partition parameter
+    double Kmnai = 30.0;    // dissocation constants for intracellular Na, Ca ions (mM)
+    double Kmcai = 0.007;   // dissocation constants for intracellular Na, Ca ions (mM)
+    double Kmnao = 87.5;    // dissocation constants for extracellular Na, Ca ions (mM)
+    double Kmcao = 1.3;     // dissocation constants for extracellular Na, Ca ions (mM)
+    double f1naca = 0.;
+    double f2naca = 0.;
+    double fallo = 0.;
+    double naca_Eup = 0.;
+    double naca_Ed1 = 0.;
+    double naca_Ed2 = 0.;
+    double naca_Ed3 = 0.;
+    double jnaca = 0.; // Calcium flux via Na-Ca exchanger (mM/ms)
+    double inaca[mypoints + 2][space + 2];
+
+    /* --------------------------------------- */
+    /* Plasma Membrane Calcium ATPase - PMCA */
+
+    double Jpmca = 3.5e-7;  // Maximal calium flux  via PMCA (mM/ms)
+    double Kmpmca = 0.0005; // half saturation conc. (mM)
+    double npmca = 2;       // Hill Coeff
+    double jpmca = 0;       // Calcium flux via PMCA (mM/ms)
+
+    printf("%s\n", "No errors in declaration.");
+
+
+    /*------------------- End of the memory allocation ----------------------*/
+    leftProc = myrank - 1;
+    rightProc = myrank + 1;
+    if (leftProc < 0)
+        leftProc = MPI_PROC_NULL;
+    if (rightProc >= numProcs)
+        rightProc = MPI_PROC_NULL;
+    /* ----------------------------------------------------------------------*/
+    /*               [ Variable Initialization Start ]                       */
+    /* ----------------------------------------------------------------------*/
+    /* Time and Space steps */
+    for (run = run_min; run <= run_max; run++)
+    {
+        dt = deltaT;
+        del_x = deltaX;
+        t = 0;
+        /*Open file which has randomly generated numbers*/
+        generate_poisson(n_mean, mypoints * space, myrank, myrank + 1, run);
+        strcpy(name, datdir);
+        sprintf(RUN, "run%d/", run);
+        strcat(name, RUN);
+        strcat(name, "random");
+        sprintf(filenumber, "%04d", myrank);
+        strcat(name, filenumber);
+        strcat(name, ".dbl");
+        F_n = fopen(name, "rb");
+        if (F_n == NULL)
+        {
+            printf("ERROR in reading input file (%s) \n", name);
+            exit(1);
+        }
+
+        /*-----------------------------------------------------------------------*/
+        /*               [ NUMERICAL VALUES ]    initialization                  */
+        /*-----------------------------------------------------------------------*/
+        for (i = 1; i <= mypoints; i++)
+        {
+            for (j = 1; j <= space; j++)
+            {
+                v[i][j] = -53.90915441282156;
+                V1[i][j] = v[i][j];
+                v_f[i][j] = E_f;
+                cai[i][j] = 0.0001161881607214449;
+                fread(&n[i][j], sizeof(int), 1, F_n);
+                G_j[i][j] = 1.0;
+                m[i][j] = 0.1253518889572223;
+                h[i][j] = 0.404599170710196;
+                b[i][j] = 0.508117603077852;
+                g[i][j] = 0.03582573962705717;
+                d[i][j] = 0.01036961357784695;
+                f1[i][j] = 0.9065941499695301;
+                f2[i][j] = 0.9065967263076083;
+                q[i][j] = 0.2060363247740295;
+                r1[i][j] = 0.1922244113609531;
+                r2[i][j] = 0.1932803618375963;
+                p[i][j] = 0.1174074734567931;
+                k1[i][j] = 0.9968385770271651;
+                k2[i][j] = 0.9968408069904307;
+                xa[i][j] = 0.0003569126518797985;
+                xab[i][j] = 0.002220456569762898;
+                s[i][j] = 0.0307583106982354;
+                x[i][j] = 0.08785242843398365;
+                y[i][j] = 0.002604864867063448;
+                c[i][j] = 0.0003764413740731269;
+                w[i][j] = 0.2345238135343783;
+                D[i][j] = DcoeffOrig;
+            }
+        }
+
+
+        /*------------------------------- end of initialization -----------------*/
+        /* open files on processors to store Vm */
+        strcpy(filename, datdir);
+        // sprintf(RUN,"run%d/",run);
+        sprintf(RUN, "run%d/", run);
+        strcat(filename, RUN);
+        sprintf(name, "myo1p%02d.dat", myrank);
+        strcat(filename, name);
+        Vout[myrank] = fopen(filename, "w");
+        /* open files on processors to store local Time series */
+        strcpy(filename, datdir);
+        // sprintf(RUN,"run%d/",run);
+        sprintf(RUN, "run%d/", run);
+        strcat(filename, RUN);
+        sprintf(name, "TserE%02d.dat", myrank);
+        strcat(filename, name);
+        Tser[myrank] = fopen(filename, "w");
+
+        /*-----------------------------------------------------------------------*/
+        /*                     [TIME EVOLUTION]                                  */
+        /*-----------------------------------------------------------------------*/
+
+        for (iter = 1; iter <= maxtime; iter++)
+        {
+            t = t + dt;
+            /*--------------------- Neumann Boundary conditions----------------------*/
+            /* y boundary */
+            for (i = 1; i < (mypoints + 1); i++)
+            {
+                v[i][0] = v[i][2];
+                v[i][space + 1] = v[i][space - 1];
+            }
+            /* x boundary */
+            if (myrank == 0)
+            {
+                for (j = 1; j <= space; j++)
+                    v[0][j] = v[2][j];
+            }
+            if (myrank == numProcs - 1)
+            {
+                for (j = 1; j <= space; j++)
+                    v[mypoints + 1][j] = v[mypoints - 1][j];
+            }
+            /*------------------- end of boundary conditions ------------------------*/
+            /* Now get ghost points */
+            if (myrank % 2)
+            {
+                /* first odd number processors */
+                MPI_Send(v[1], space + 2, MPI_DOUBLE, leftProc, 0, MPI_COMM_WORLD);
+                MPI_Recv(v[0], space + 2, MPI_DOUBLE, leftProc, 0, MPI_COMM_WORLD, &status);
+                MPI_Send(v[mypoints], space + 2, MPI_DOUBLE, rightProc, 0, MPI_COMM_WORLD);
+                MPI_Recv(v[mypoints + 1], space + 2, MPI_DOUBLE, rightProc, 0, MPI_COMM_WORLD, &status);
+            }
+            else
+            {
+                MPI_Recv(v[mypoints + 1], space + 2, MPI_DOUBLE, rightProc, 0, MPI_COMM_WORLD, &status);
+                MPI_Send(v[mypoints], space + 2, MPI_DOUBLE, rightProc, 0, MPI_COMM_WORLD);
+                MPI_Recv(v[0], space + 2, MPI_DOUBLE, leftProc, 0, MPI_COMM_WORLD, &status);
+                MPI_Send(v[1], space + 2, MPI_DOUBLE, leftProc, 0, MPI_COMM_WORLD);
+            }
+            /*----------- Computation at the grid points start ----------------------*/
+            for (i = 1; i <= mypoints; i++)
+            {
+                for (j = 1; j <= space; j++)
+                {
+                    // local data recorded
+                    ElecA1 = V1[1][(int)space / 2];
+
+                    //Apply stimulus, if prescription says so
+                    if (myrank == 0 && i == 1 && t <= stimtime)
+                        I_stim[i][j] = Istim;
+                    else if (t >= secondstimstart && t <= secondstimstart + 3 * stimtime && j <= space / 2 && j >= 1)
+                        I_stim[i][j] = Istim;
+                    else
+                        I_stim[i][j] = 0.0;
+                    //Compute currents
+                    /* ---------------------------------------
+                    Note: Functions with 'ss' suffix are steady-state functions: e.g wss, and these are dimensionless.
+                    Functions with 'tc' suffix are time constant functions: e.g wtc, and these are in ms.
+                    --------------------------------------- */
+                    /* Sodium current - INa */
+                    mss = (1.0 / (1.0 + exp(-(v[i][j] + 35.9584) / 9.24013)));                           // steady-state function for m gate
+                    hss = (1.0 / (1.0 + exp((v[i][j] + 57.0) / 8.0)));                                   // steady-state function for h gate
+                    mtc = (0.25 + 7.0 / (1.0 + exp((v[i][j] + 38.0) / 10.0)));                           // time constant function for m gate
+                    htc = (0.9 + 1002.85 / (1.0 + ((v[i][j] + 47.5) / 1.5) * ((v[i][j] + 47.5) / 1.5))); // time constant function for h gate
+                    ena = ((R * temp / frdy) * log(nao / nai));                                          // reversal potential for sodium (mV)
+                    ina[i][j] = (gna * (m[i][j] * m[i][j] * m[i][j]) * h[i][j] * (v[i][j] - ena));       // INa
+
+                    /* L-type calcium current - ICaL */
+                    fca = (1.0 / (1.0 + pow((cai[i][j] / kmca), 4.0)));                                                                                 // Ca inhibition in ICaL
+                    dss = (1.0 / (1.0 + exp(-(v[i][j] + 22.0) / 7.0)));                                                                                 // steady-state for d
+                    f1ss = (1.0 / (1.0 + exp((v[i][j] + 38.0) / 7.0)));                                                                                 // steady-state for f1
+                    f2ss = f1ss;                                                                                                                        // steady-state for f2
+                    dtc = (2.29 + 5.7 / (1.0 + ((v[i][j] + 29.97) / 9.0) * ((v[i][j] + 29.97) / 9.0)));                                                 //time constant for d
+                    f1tc = (12.0);                                                                                                                      // time constant for f1
+                    f2tc = (90.9699 * (1.0 - (1.0 / (1.0 + exp((v[i][j] + 13.9629) / 45.3782))) * (1.0 / (1.0 + exp(-(v[i][j] + 9.49866) / 3.3945))))); // time constant for f2
+                    ical[i][j] = (gcal * fca * (d[i][j] * d[i][j]) * (0.8 * f1[i][j] + 0.2 * f2[i][j]) * (v[i][j] - ecal));                             // ICaL
+
+                    /* T-type calcium current - ICaT */
+                    bss = (1.0 / (1.0 + exp(-(v[i][j] + 54.23) / 9.88)));                                                                      // steady-state for b
+                    gss = (0.02 + (1.0 - 0.02) / (1.0 + exp((v[i][j] + 72.978) / 4.64)));                                                      // steady-state for g
+                    btc = (0.45 + 3.9 / (1.0 + ((v[i][j] + 66.0) / 26.0) * ((v[i][j] + 66.0) / 26.0)));                                        // time constant for b
+                    gtc = (150.0 * (1.0 - (1.0 / (1.0 + exp((v[i][j] - 417.43) / 203.18))) * (1.0 / (1.0 + exp(-(v[i][j] + 61.11) / 8.07))))); // time constant for g
+                    icat[i][j] = (gcat * (b[i][j] * b[i][j]) * g[i][j] * (v[i][j] - ecat));                                                    // ICaT
+
+                    /* Voltage-gated potassium - IK1 */
+                    qss = (0.978613 / (1.0 + exp(-(v[i][j] + 18.6736) / 26.6606)));                                      // steady-state for q
+                    r1ss = (1.0 / (1.0 + exp((v[i][j] + 63.0) / 6.3)));                                                  // steady-state for r1
+                    r2ss = r1ss;                                                                                         // steady-state for r2
+                    qtc = (500.0 / (1.0 + ((v[i][j] + 60.71) / 15.79) * ((v[i][j] + 60.71) / 15.79)));                   // time constant for q
+                    r1tc = (5000.0 / (1.0 + ((v[i][j] + 62.7133) / 35.8611) * ((v[i][j] + 62.7133) / 35.8611)));         // time constant for r1
+                    r2tc = (30000.0 + 220000.0 / (1.0 + exp((v[i][j] + 22.0) / 4.0)));                                   // time constant for r2
+                    ek = ((R * temp / frdy) * log(ko / ki));                                                             // reversal potentials for potassium (mV)
+                    ik1[i][j] = (gk * gk1 * (q[i][j] * q[i][j]) * (0.38 * r1[i][j] + 0.63 * r2[i][j]) * (v[i][j] - ek)); // IK1
+
+                    /* Voltage-gated potassium - IK2 */
+
+                    pss = (0.948 / (1.0 + exp(-(v[i][j] + 17.91) / 18.4)));                                                                                      // steady-state for p
+                    k1ss = (1.0 / (1.0 + exp((v[i][j] + 21.2) / 5.7)));                                                                                          // steady-state for k1
+                    k2ss = k1ss;                                                                                                                                 // steady-state for k2
+                    ptc = (100.0 / (1.0 + ((v[i][j] + 64.1) / 28.67) * ((v[i][j] + 64.1) / 28.67)));                                                             // time constant for p
+                    k1tc = (1.0e6 * (1.0 - (1.0 / (1.0 + exp((v[i][j] - 315.0) / 50.0))) * (1.0 / (1.0 + exp(-(v[i][j] + 74.9) / 8.0)))));                       // time constant for k1
+                    k2tc = (1000.0 * 2500.0 * (1.0 - (1.0 / (1.0 + exp((v[i][j] - 132.868) / 25.3992))) * (1.0 / (1.0 + exp(-(v[i][j] + 24.9203) / 2.67915))))); // time constant for k2
+                    ik2[i][j] = (gk * gk2 * (p[i][j] * p[i][j]) * (0.75 * k1[i][j] + 0.25 * k2[i][j]) * (v[i][j] - ek));                                         // IK2
+
+                    /* BK current, consists of subunit alpha - BKa  */
+                    xass_z = (-0.749234 / (1.0 + ((cai[i][j] * 1000.0 - 0.0630535) / 0.161942) * ((cai[i][j] * 1000.0 - 0.0630535) / 0.161942)) + 8.38384 / (1.0 + ((cai[i][j] * 1000.0 + 1538.29) / 739.057) * ((cai[i][j] * 1000.0 + 1538.29) / 739.057))); // gating charge for xa
+                    xass_vh = (5011.47 / (1.0 + pow(((cai[i][j] * 1000.0 + 0.237503) / 0.000239278), 0.42291)) - 37.5137);                                                                                                                                    // half-activation constant for xa
+                    xass = (1.0 / (1.0 + exp(-xass_z * frdy * (v[i][j] - xass_vh) / (R * temp))));                                                                                                                                                            // steady-state for xa
+                    xatc = (2.40914 / (1.0 + ((v[i][j] - 158.779) / (-52.1497)) * ((v[i][j] - 158.779) / (-52.1497))));                                                                                                                                       // time constant for xa
+                    BKa[i][j] = (gkca * gbka * xa[i][j] * (v[i][j] - ek));                                                                                                                                                                                    // BKa
+
+                    /* BK current, consists of subunits alpha and beta1  - BKab  */
+                    xabss_z = (-0.681249 / (1.0 + ((cai[i][j] * 1000.0 - 0.218988) / 0.428335) * ((cai[i][j] * 1000.0 - 0.218988) / 0.428335)) + 1.40001 / (1.0 + ((cai[i][j] * 1000.0 + 228.71) / 684.946) * ((cai[i][j] * 1000.0 + 228.71) / 684.946))); // gating charge for xab
+                    xabss_vh = (8540.23 / (1.0 + pow(((cai[i][j] * 1000.0 + 0.401189) / 0.00399115), 0.668054)) - 109.275);                                                                                                                                // half-activation constant for xab
+                    xabss = (1.0 / (1.0 + exp(-xabss_z * frdy * (v[i][j] - xabss_vh) / (R * temp))));                                                                                                                                                      // steady-state for xab
+                    xabtc = (13.8049 / (1.0 + ((v[i][j] - 153.019) / 66.4952) * ((v[i][j] - 153.019) / 66.4952)));                                                                                                                                         // time constant for xab
+                    BKab[i][j] = (gkca * gbkab * xab[i][j] * (v[i][j] - ek));                                                                                                                                                                              // BKab
+
+                    /* A-type transient potassium current - IKa */
+                    sss = (1.0 / (1.0 + exp(-(v[i][j] + 27.79) / 7.57)));                                       // steady-state for s
+                    xss = (0.02 + 0.98 / (1.0 + exp((v[i][j] + 69.5) / 6.0)));                                  // steady-state for x
+                    stc = (17.0 / (1.0 + ((v[i][j] + 20.5232) / 35.0) * ((v[i][j] + 20.5232) / 35.0)));         // time constant for s
+                    xtc = (7.5 + 10.0 / (1.0 + ((v[i][j] + 34.1765) / 120.0) * ((v[i][j] + 34.1765) / 120.0))); // time constant for x
+
+                    ika[i][j] = (gk * gka * s[i][j] * x[i][j] * (v[i][j] - ek)); // IKa
+
+                    /* Hyperpolarization-activated current - Ih */
+                    yss = (1.0 / (1.0 + exp((v[i][j] + 105.39) / 8.6553))); //steady-state for y
+                    ya = (3.5e-6 * exp(-0.0497 * v[i][j]));
+                    yb = (0.04003 * exp(0.05211 * v[i][j]));
+                    ytc = (1.0 / (ya + yb));                                                           // time constant for y
+                    eh = ((R * temp / frdy) * log((ko + (PNa / PK) * nao) / (ki + (PNa / PK) * nai))); // reversal potentials (mV)
+
+                    ih[i][j] = (gh * y[i][j] * (v[i][j] - eh)); //Ih
+
+                    /* Calcium-dependent Chloride current - ICl */
+                    K1cl = (0.0006 * exp(2.53 * vFRT(v[i][j])));
+                    K2cl = (0.1 * exp(-5.0 * vFRT(v[i][j])));
+                    css = (1.0 / (1.0 + K2cl * ((K1cl / cai[i][j]) * (K1cl / cai[i][j]) + K1cl / cai[i][j] + 1.0)));                 //steady-state for c
+                    ctc = (-160.0 + 210.0 / (1.0 + exp((v[i][j] + 4.56) / 11.62)) + 170.0 / (1.0 + exp(-(v[i][j] + 25.5) / 11.62))); // time constant for c
+                    ecl = (((R * temp) / frdy) * log(cli / clo));                                                                    // reversal potentials (mV)
+                    icl[i][j] = (gcl * c[i][j] * (v[i][j] - ecl));                                                                   // ICL
+
+                    /* Non-specific cation current  - INSCC */
+
+                    fmg = (0.108043 + 0.903902 / (1.0 + pow((mgo / 0.281007), 1.29834)));                                                                                                                                         // Magnesium inhibition of INSCC
+                    enscc = ((R * temp / frdy) * log((PnsK * ko + PnsNa * nao + 4 * PnsCa * (1.0 / (1.0 + exp(vFRT(v[i][j])))) * cao) / (PnsK * ki + PnsNa * nai + 4 * PnsCa * (1.0 / (1.0 + exp(vFRT(v[i][j])))) * cai[i][j]))); // reversal potentials (mV)
+                    insca = (fmg * (gs_ca(cao) * gnsCa) * gns * (v[i][j] - (enscc)));                                                                                                                                             // Ca component of INSCC
+                    insna = (fmg * (gs_x(nao) * gnsNa) * gns * (v[i][j] - (enscc)));                                                                                                                                              // Na component of INSCC
+                    insk = (fmg * (gs_x(ko) * gnsK) * gns * (v[i][j] - (enscc)));                                                                                                                                                 // K component of INSCC
+                    il = (fmg * (gl) * (v[i][j] - (enscc)));                                                                                                                                                                      // leak component of INSCC
+                    inscc[i][j] = (insca + insna + insk + il);                                                                                                                                                                    // INSCC
+
+                    /* Na-Ca exchanger */
+
+                    f1naca = (exp((xgamma - 1.0) * vFRT(v[i][j])));
+                    f2naca = (exp(xgamma * vFRT(v[i][j])));
+                    fallo = (1.0 / (1.0 + pow((Kmallo / cai[i][j]), nallo)));
+                    naca_Eup = (Jnaca * ((nai * nai * nai) * cao * f2naca - (nao * nao * nao) * cai[i][j] * f1naca));
+                    naca_Ed1 = (1.0 + ksat * f1naca);
+                    naca_Ed2 = (Kmcao * (nai * nai * nai) + (Kmnao * Kmnao * Kmnao) * cai[i][j] + (Kmnai * Kmnai * Kmnai) * cao * (1.0 + cai[i][j] / Kmcai));
+                    naca_Ed3 = (cao * (nai * nai * nai) + (nao * nao * nao) * cai[i][j] + (nao * nao * nao) * Kmcai * (1.0 + (nai / Kmnai) * (nai / Kmnai) * (nai / Kmnai)));
+                    jnaca = (fallo * naca_Eup / (naca_Ed1 * (naca_Ed2 + naca_Ed3))); // Calcium flux via Na-Ca exchanger (mM/ms)
+
+                    inaca[i][j] = (jnaca * ((zca * frdy) / (AV * Cm * buff)));
+
+                    /* Na-K pump */
+                    fnak = (1.0 / (1.0 + 0.1245 * exp(-0.1 * vFRT(v[i][j])) + 2.19e-3 * (exp(nao / 49.71)) * exp(-1.9 * vFRT(v[i][j])))); // Voltage-dependency of INaK
+                    knak = (1.0 / (1.0 + pow((nakKmko / ko), 1.5)));                                                                      // ko-dependency of INaK
+                    nnak = (1.0 / (1.0 + pow((nakKmnai / nai), 2)));                                                                      // nai-dependency of INaK
+                    inak[i][j] = (ginak * knak * nnak * fnak);                                                                            // INaK
+
+                    /* background current - Ib */
+
+                    ib[i][j] = (gb * (v[i][j] - ek)); // Ib
+
+                    /* Total ionic current - it */
+                    it[i][j] = ina[i][j] + ical[i][j] + icat[i][j] + ik1[i][j] + ik2[i][j] + BKa[i][j] + BKab[i][j] + ika[i][j] + ih[i][j] + icl[i][j] + inscc[i][j] + 0.5 * inaca[i][j] + inak[i][j] + ib[i][j];
+
+                    /*End of current computation*/
+
+                    /* Calcium-dependent force */
+                    wss = (1.0 / (1.0 + pow(((FKm * 1e-6) / cai[i][j]), Fn)));                                      // steady-state function for w gate
+                    wtc = (4000.0 * (0.234845 + ((1.0 - 0.234845) / (1.0 + pow((cai[i][j] / (FKm * 1e-6)), Fn))))); // time constant function for w gate
+
+                    /* Compute Ca fluxes */
+
+                    /* Plasma Membrane Calcium ATPase - PMCA */
+                    jpmca = (Jpmca / (1.0 + pow((Kmpmca / cai[i][j]), npmca))); // Calcium flux via PMCA (mM/ms)
+                    jt[i][j] = (((AV * Cm * buff) / (zca * frdy)) * (ical[i][j] + icat[i][j] + insca) - jnaca + jpmca);
+
+                    cai[i][j] += -dt * jt[i][j];
+
+                    /*End of Ca flux computation*/
+
+                    /*Compute voltages v and v_f*/
+
+                    V1[i][j] = v[i][j] + dt * ((D[i][j] / (del_x * del_x)) * (v[i + 1][j] + v[i - 1][j] + v[i][j + 1] + v[i][j - 1] - 4 * v[i][j]) - (I_stim[i][j] + it[i][j] - n[i][j] * G_j[i][j] * (v_f[i][j] - v[i][j]) / C_m)); //Assume C_m=120 pF, C_f=80pF
+                    v_f[i][j] += (-dt / C_f) * (G_f * (v_f[i][j] - E_f) + G_j[i][j] * (v_f[i][j] - v[i][j]));
+
+                    /* Calculate force */
+                    /* Ft=Fmax*w; */
+                    /* Set force to zero at rest */
+                    Ft[i][j] = Fmax * (w[i][j] - 0.2345);
+
+                    /* Calculate total IK */
+                    ik[i][j] = ik1[i][j] + ik2[i][j] + BKa[i][j] + BKab[i][j] + ika[i][j] + ib[i][j];
+
+                    /*Computing ODEs using forward Euler method*/
+
+                    m[i][j] += dt * ((mss - m[i][j]) / (mtc));
+                    h[i][j] += dt * ((hss - h[i][j]) / (htc));
+                    d[i][j] += dt * ((dss - d[i][j]) / (dtc));
+                    f1[i][j] += dt * ((f1ss - f1[i][j]) / (f1tc));
+                    f2[i][j] += dt * ((f2ss - f2[i][j]) / (f2tc));
+                    b[i][j] += dt * ((bss - b[i][j]) / (btc));
+                    g[i][j] += dt * ((gss - g[i][j]) / (gtc));
+                    q[i][j] += dt * ((qss - q[i][j]) / (qtc));
+                    r1[i][j] += dt * ((r1ss - r1[i][j]) / (r1tc));
+                    r2[i][j] += dt * ((r2ss - r2[i][j]) / (r2tc));
+                    p[i][j] += dt * ((pss - p[i][j]) / (ptc));
+                    k1[i][j] += dt * ((k1ss - k1[i][j]) / (k1tc));
+                    k2[i][j] += dt * ((k2ss - k2[i][j]) / (k2tc));
+                    xa[i][j] += dt * ((xass - xa[i][j]) / (xatc));
+                    xab[i][j] += dt * ((xabss - xab[i][j]) / (xabtc));
+                    s[i][j] += dt * ((sss - s[i][j]) / (stc));
+                    x[i][j] += dt * ((xss - x[i][j]) / (xtc));
+                    y[i][j] += dt * ((yss - y[i][j]) / (ytc));
+                    c[i][j] += dt * ((css - c[i][j]) / (ctc));
+                    w[i][j] += dt * (wss - w[i][j]) / wtc;
+                }
+            }
+            /*----------- Computation at the grid points end ------------------------*/
+            for (i = 1; i <= mypoints; i++)
+            {
+                for (j = 1; j <= space; j++)
+                    v[i][j] = V1[i][j];
+            }
+            /* V data stored in each "interval" step */
+            if (iter % interval == 0)
+            {
+                for (i = 1; i <= mypoints; i++)
+                {
+                    for (j = 1; j <= space; j++)
+                        fwrite(&v[i][j], sizeof(double), 1, Vout[myrank]);
+                }
+            }
+            if (myrank % 6 == 0)
+            {
+                fprintf(Tser[myrank], "%f\n", ElecA1);
+            }
+        }
+        /*--------------------- end of time iteration loop ----------------------*/
+        fclose(Vout[myrank]);
+        fclose(F_n);
+        fclose(Tser[myrank]);
+    }
+    endtime = MPI_Wtime();
+    if (myrank == 0)
+    {
+        MPI_Get_processor_name(procname, &namelen);
+        printf("---------------------------------------------\n");
+        printf("CLUSTER NAME: %s\n", procname);
+        printf("---------------------------------------------\n");
+    }
+    printf("time in %02d th processor is %f seconds\n", myrank, endtime - starttime);
+
+    int Proc = numProcs;
+    // char RUN[5], name[200];
+    // char filename[numProcs];
+    // int run;
+    FILE  *F2;
+    double *vv;
+    int *nn;
+    // int mypoints = spacex / numProcs;
+    // vv = (double *)array1d(mypoints * space, sizeof(double)); //A simple function to allocate memory to 1D arrays
+    double vv[mypoints * space];
+
+    // nn = (int *)array1d(mypoints * space, sizeof(int));
+    int nn[mypoints * space];
+    for (run = run_min; run <= run_max; run++)
+    {
+        strcpy(name, datdir);
+        sprintf(RUN, "run%d/", run);
+        strcat(name, RUN);
+        sprintf(filename, "VmyoData.dat");
+        strcat(name, filename);
+        printf("%s\n", name);
+        F2 = fopen(name, "w");
+        for (i = 0; i < numProcs; i++)
+        {
+            strcpy(name, datdir);
+            strcat(name, RUN);
+            sprintf(filename, "myo1p%02d.dat", i);
+            strcat(name, filename);
+            //      printf("%s\n",name);
+            Vout[i] = fopen(name, "r");
+        }
+        // Collect the Vm data from each processors and write on a file
+        for (iter = 1; iter < (maxtime / interval) + 0.5; iter++)
+        {
+            for (i = 0; i < numProcs; i++)
+            {
+                fread(vv, sizeof(double), mypoints * space, Vout[i]);
+                fwrite(vv, sizeof(double), mypoints * space, F2);
+            }
+        }
+        for (i = 0; i < numProcs; i++)
+            fclose(Vout[i]);
+        fclose(F2);
+        strcpy(name, datdir);
+        strcat(name, RUN);
+        sprintf(filename, "random.dbl");
+        strcat(name, filename);
+        //    printf("%s\n",name);
+        F2 = fopen(name, "w");
+        for (i = 0; i < numProcs; i++)
+        {
+            strcpy(name, datdir);
+            strcat(name, RUN);
+            sprintf(filename, "random%04d.dbl", i);
+            strcat(name, filename);
+            //      printf("%s\n",name);
+            Vout[i] = fopen(name, "r");
+        }
+        // Collect the random number data from each processors and write on a file
+        for (i = 0; i < numProcs; i++)
+        {
+            fread(nn, sizeof(int), mypoints * space, Vout[i]);
+            fwrite(nn, sizeof(int), mypoints * space, F2);
+        }
+        // Delete the system files at each processor
+
+        sprintf(filename, "rm -f /home/himanshu/Desktop/final-undergraduate_project/data/run%d/myo1p*", run);
+        system(filename);
+        sprintf(filename, "rm -f /home/himanshu/Desktop/final-undergraduate_project/data/run%d/random0*", run);
+        system(filename);
+
+        printf("%s\n", "accumulate functioned properly.");
+    }
+
+
+
+
+
+    MPI_Finalize();
+
+    return 0;
+}
+
